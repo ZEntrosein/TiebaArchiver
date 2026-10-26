@@ -166,3 +166,8 @@ cython_debug/
 scraped_data
 tieba_auth.json
 scrape_config.json
+storage_config.json
+*.zip.lock
+.tieba-*/
+.tieba-*.zip.tmp
+release/

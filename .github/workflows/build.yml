@@ -25,10 +25,13 @@ jobs:
         pip install pyinstaller
         pip install -r requirements.txt
 
+    - name: Test storage and archive updates
+      run: python -m unittest discover -s tests -v
+
     - name: Build executable
       run: |
         cd ./src
-        python -m PyInstaller --onefile --name=TiebaScraper_v1.2.1 ./cli_entry.py
+        python -m PyInstaller --onefile --name=TiebaScraper_zip ./cli_entry.py
 
     - name: Upload Release Artifacts
       uses: actions/upload-artifact@v4

@@ -3,6 +3,8 @@ import re
 import time
 from os import path
 
+from storage_config import StorageConfig, safe_filename, forum_directory_name
+
 
 def sanitize_filename(filename: str) -> str:
     """
@@ -29,10 +31,10 @@ class ScrapeDataPathBuilder:
     @classmethod
     def get_instance_scrape(cls, forum_name: str, tid: int, title: str) -> "ScrapeDataPathBuilder":
         item_dir = path.join(
-            path.join(os.getcwd(), cls.DATA_FOLDER_NAME),
-            f"[{forum_name}吧][{tid}]{sanitize_filename(title)}_{get_timestamp()}",
+            str(StorageConfig.forum_output_directory(forum_name)),
+            f"[{forum_directory_name(forum_name)}][{tid}]{safe_filename(title, max_length=70)}_{get_timestamp()}",
         )
-        os.makedirs(item_dir, exist_ok=True)
+        os.makedirs(item_dir, exist_ok=False)
         return ScrapeDataPathBuilder(item_dir)
 
     @classmethod

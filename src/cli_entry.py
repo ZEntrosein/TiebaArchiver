@@ -1,18 +1,23 @@
 import asyncio
 import os
 import sys
+import sqlite3
+import zipfile
 from enum import IntEnum, auto
+from pathlib import Path
 
 import orjson
 import questionary
 
+from archive_cli import configure_console, export_archives, main as archive_main
 from modules.scrape_module import scrape
 from modules.scrape_update_module import scrape_update
 from scrape_config import DownloadUserAvatarMode, ScrapeConfig, ScrapeConfigKeys, PostFilterType
 from tieba_auth import TiebaAuth
+from storage_config import StorageConfig
 from utils.cli_questionary import InfoStyle
 from utils.common import counter_gen, json_dumps
-from utils.msg_printer import PrintColor
+from utils.msg_printer import MsgPrinter
 
 counter = counter_gen()
 next(counter)  # 预激一次生成器
@@ -147,11 +152,61 @@ def set_scrape_config() -> None:
             break
 
 
+def set_storage_config() -> None:
+    StorageConfig.load()
+    while True:
+        print(f"当前保存位置: {StorageConfig.output_root()}")
+        selected = questionary.select("存储设置", choices=[
+            questionary.Choice("保存位置：默认位置 / 手动设置", "directory"),
+            questionary.Choice(f"存档格式：{StorageConfig.ARCHIVE_FORMAT}", "format"),
+            questionary.Choice(f"按吧名创建目录：{'是' if StorageConfig.GROUP_BY_FORUM else '否'}", "group"),
+            questionary.Choice("返回", "back"),
+        ]).ask()
+        if selected in (None, "back"):
+            return
+        if selected == "directory":
+            mode = questionary.select("选择保存位置", choices=[
+                questionary.Choice("默认位置（当前工作目录下的 scraped_data）", "default"),
+                questionary.Choice("手动指定目录", "custom"),
+            ]).ask()
+            if mode == "default":
+                StorageConfig.OUTPUT_DIRECTORY = ""
+            elif mode == "custom":
+                directory = questionary.text("请输入保存根目录：", default=str(StorageConfig.output_root())).ask()
+                if not directory or not directory.strip():
+                    continue
+                directory = directory.strip().strip('"')
+                resolved = Path(os.path.expandvars(directory)).expanduser().resolve()
+                if resolved.exists() and not resolved.is_dir():
+                    MsgPrinter.print_error("该路径是文件，请选择目录", "StorageConfig")
+                    continue
+                StorageConfig.OUTPUT_DIRECTORY = str(resolved)
+            else:
+                continue
+        elif selected == "format":
+            value = questionary.select("选择存档格式", choices=[
+                questionary.Choice("ZIP 压缩包（每个帖子一个包，支持直接更新）", "zip"),
+                questionary.Choice("文件夹（原始存档格式）", "folder"),
+            ]).ask()
+            if value is None:
+                continue
+            StorageConfig.ARCHIVE_FORMAT = value
+        elif selected == "group":
+            value = questionary.confirm("是否在保存根目录下按吧名创建目录？", default=StorageConfig.GROUP_BY_FORUM).ask()
+            if value is None:
+                continue
+            StorageConfig.GROUP_BY_FORUM = value
+        StorageConfig.save()
+        MsgPrinter.print_success("存储设置已保存", "StorageConfig")
+
+
 class ProgramFeatures(IntEnum):
     SCRAPE = auto()
     SCRAPE_UPDATE = auto()
-    EXPORT_TO_READABLE = auto()
     MODIFY_SCRAPE_CONFIG = auto()
+    EXPORT_ZIP = auto()
+    MODIFY_STORAGE_CONFIG = auto()
+    EXIT = auto()
 
 
 def main():
@@ -163,39 +218,68 @@ def main():
             ProgramFeatures.SCRAPE,
         ),
         questionary.Choice(
-            f"{next(counter)}. 更新本地的帖子数据",
+            f"{next(counter)}. 更新本地帖子（文件夹 / ZIP）",
             ProgramFeatures.SCRAPE_UPDATE,
         ),
         questionary.Choice(
-            f"{next(counter)}. 导出为可读文件(未实现)",
-            ProgramFeatures.EXPORT_TO_READABLE,
+            f"{next(counter)}. 将已有存档导出为 ZIP（支持批量）",
+            ProgramFeatures.EXPORT_ZIP,
+        ),
+        questionary.Choice(
+            f"{next(counter)}. 修改存储设置（位置、格式、按吧分类）",
+            ProgramFeatures.MODIFY_STORAGE_CONFIG,
         ),
         questionary.Choice(
             f"{next(counter)}. 修改爬取配置",
             ProgramFeatures.MODIFY_SCRAPE_CONFIG,
         ),
+        questionary.Choice(f"{next(counter)}. 退出", ProgramFeatures.EXIT),
     ]
     while True:
-        selected_features = questionary.select("选择功能", choices=features_choices, style=InfoStyle).ask()
-
-        if ProgramFeatures.SCRAPE == selected_features:
-            try:
+        try:
+            selected_features = questionary.select("选择功能", choices=features_choices, style=InfoStyle).ask()
+            if selected_features in (None, ProgramFeatures.EXIT):
+                return
+            if ProgramFeatures.SCRAPE == selected_features:
                 read_tieba_auth()
                 read_scrape_config()
-                tid = int(questionary.text("请输入要爬取的帖子的tid: ").ask())
+                StorageConfig.load()
+                value = questionary.text("请输入要爬取的帖子的tid: ").ask()
+                if value is None:
+                    continue
+                try:
+                    tid = int(value)
+                    if tid <= 0:
+                        raise ValueError
+                except ValueError:
+                    MsgPrinter.print_error("tid 必须为正整数", "Scrape")
+                    continue
                 asyncio.run(scrape(tid))
-            except ValueError:
-                print(f"{PrintColor.RED}tid 必须为整数{PrintColor.RESET}")
-        elif ProgramFeatures.SCRAPE_UPDATE == selected_features:
-            read_tieba_auth()
-            read_scrape_config()
-            path = input("请输入本地帖子数据的路径: ")
-            asyncio.run(scrape_update(path))
-        elif ProgramFeatures.EXPORT_TO_READABLE == selected_features:
-            print(f"{PrintColor.RED}该功能尚未实现{PrintColor.RESET}")
-        elif ProgramFeatures.MODIFY_SCRAPE_CONFIG == selected_features:
-            set_scrape_config()
+            elif ProgramFeatures.SCRAPE_UPDATE == selected_features:
+                read_tieba_auth()
+                read_scrape_config()
+                StorageConfig.load()
+                path = questionary.text("请输入帖子存档目录或 ZIP 文件的路径: ").ask()
+                if path:
+                    asyncio.run(scrape_update(path))
+            elif ProgramFeatures.EXPORT_ZIP == selected_features:
+                StorageConfig.load()
+                path = questionary.text("请输入单份帖子目录或存档根目录: ").ask()
+                if path:
+                    export_archives(path)
+            elif ProgramFeatures.MODIFY_STORAGE_CONFIG == selected_features:
+                set_storage_config()
+            elif ProgramFeatures.MODIFY_SCRAPE_CONFIG == selected_features:
+                read_scrape_config()
+                set_scrape_config()
+        except (ValueError, OSError, sqlite3.Error, zipfile.BadZipFile) as exc:
+            MsgPrinter.print_error(str(exc), "Operation")
+        except KeyboardInterrupt:
+            return
 
 
 if __name__ == "__main__":
+    configure_console()
+    if len(sys.argv) > 1:
+        raise SystemExit(archive_main())
     main()

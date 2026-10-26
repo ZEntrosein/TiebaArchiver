@@ -1,6 +1,8 @@
 import asyncio
 import os
+import shutil
 import time
+from pathlib import Path
 
 from aiotieba.api.get_posts._classdef import ShareThread_pt
 
@@ -9,6 +11,8 @@ from config.path_config import ScrapeDataPathBuilder
 from container.container import Container
 from pojo.scrape_info import ScrapeInfo
 from scrape_config import ScrapeConfig
+from storage_config import StorageConfig
+from utils.archive import create_zip
 from services.post_service import PostService
 from services.thread_service import ThreadService
 from services.user_service import UserService
@@ -60,23 +64,50 @@ async def scrape(tid: int):
             )
         )
 
-    main_thread_id = tid
-    await scrape_thread(main_thread_id)
+    item_directory = Path(scrape_data_path_builder.get_item_dir())
+    try:
+        main_thread_id = tid
+        if not await scrape_thread(main_thread_id):
+            MsgPrinter.print_error(f"抓取未完成，已获取的数据保留在: {item_directory}", "Scrape")
+            return None
 
-    share_origin_id = pre_post.thread.share_origin.tid
-    if share_origin_id != 0:
-        MsgPrinter.print_step_mark("开始处理 share_origin")
-        await scrape_thread(share_origin_id, is_share_origin=True, share_origin=pre_post.thread.share_origin)
+        share_origin_id = pre_post.thread.share_origin.tid
+        if share_origin_id != 0:
+            MsgPrinter.print_step_mark("开始处理 share_origin")
+            await scrape_thread(share_origin_id, is_share_origin=True, share_origin=pre_post.thread.share_origin)
+    except BaseException:
+        MsgPrinter.print_error(f"抓取中断，已获取的数据保留在: {item_directory}", "Scrape")
+        raise
+    finally:
+        Container.close_thread_resources()
+
+    saved_path = item_directory
+    if StorageConfig.ARCHIVE_FORMAT == "zip":
+        # This directory was created exclusively for this scrape. Retain it on any packaging failure.
+        try:
+            saved_path = create_zip(item_directory, item_directory.with_name(item_directory.name + ".zip"))
+        except Exception:
+            MsgPrinter.print_error(f"打包失败，帖子数据保留在: {item_directory}", "Scrape")
+            raise
+        shutil.rmtree(item_directory)
 
     scrape_end_time = time.time()
     scrape_duration = scrape_end_time - scrape_start_time
 
     MsgPrinter.print_step_mark("任务完成")
     MsgPrinter.print_tip(f"耗时 {int(scrape_duration // 60)} 分 {round(scrape_duration % 60, 2)} 秒")
-    MsgPrinter.print_tip(f"帖子数据保存在: {scrape_data_path_builder.get_item_dir()}")
+    MsgPrinter.print_tip(f"帖子数据保存在: {saved_path}")
+    return saved_path
 
 
 async def scrape_thread(tid: int, *, is_share_origin: bool = False, share_origin: ShareThread_pt | None = None):
+    try:
+        return await _scrape_thread(tid, is_share_origin=is_share_origin, share_origin=share_origin)
+    finally:
+        Container.close_thread_resources()
+
+
+async def _scrape_thread(tid: int, *, is_share_origin: bool = False, share_origin: ShareThread_pt | None = None):
     if tid <= 0:
         return
 
@@ -108,7 +139,7 @@ async def scrape_thread(tid: int, *, is_share_origin: bool = False, share_origin
                 user_service.complete_user_info(),
             )
         final_treatment()
-        return
+        return is_share_origin and share_origin is not None
 
     await asyncio.gather(
         thread_service.save_forum_info(pre_fetch_posts.forum.fid),
@@ -124,7 +155,7 @@ async def scrape_thread(tid: int, *, is_share_origin: bool = False, share_origin
         await post_service.save_post_from_floor1(pre_fetch_posts.objs[0])
 
         final_treatment()
-        return
+        return True
 
     await post_service.scrape_post(pre_fetch_posts.page.total_page)
 
@@ -135,3 +166,4 @@ async def scrape_thread(tid: int, *, is_share_origin: bool = False, share_origin
     final_treatment()
     MsgPrinter.print_step_mark("帖子爬取完成", ["tid", tid])
     scrape_logger.info(generate_scrape_logger_msg("帖子爬取完成", "StepMark", ["tid", tid]))
+    return True

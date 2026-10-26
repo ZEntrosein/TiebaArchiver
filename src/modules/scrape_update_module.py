@@ -18,9 +18,24 @@ from utils.cli_questionary import WarningStyle
 from utils.common import json_dumps
 from utils.logger import generate_scrape_logger_msg
 from utils.msg_printer import MsgPrinter
+from utils.archive import open_update_workspace
 
 
 async def scrape_update(path: str):
+    with open_update_workspace(path) as workspace:
+        try:
+            completed = await _scrape_update_directory(str(workspace.directory))
+        finally:
+            Container.close_thread_resources()
+        if completed:
+            saved_path = workspace.commit()
+            MsgPrinter.print_step_mark("任务完成")
+            MsgPrinter.print_tip(f"帖子数据保存在: {saved_path}")
+            return saved_path
+    return None
+
+
+async def _scrape_update_directory(path: str):
     if not os.path.isdir(path):
         MsgPrinter.print_error(
             "输入的路径不存在",
@@ -64,12 +79,10 @@ async def scrape_update(path: str):
 
     scrape_info["update_time"] = Container.get_scrape_timestamp()
     scrape_info["scraper_version"] = scraper_config.SCRAPER_VERSION
-    with open(scrape_info_path, "w", encoding="utf-8") as file:
-        file.write(json_dumps(scrape_info))
-
     # ANCHOR main_thread
     main_thread_id = scrape_info["main_thread"]
-    await update_thread(main_thread_id)
+    if not await update_thread(main_thread_id):
+        return False
 
     with open(scrape_data_path_builder.get_thread_info_path(main_thread_id), "r", encoding="utf-8") as file:
         main_thread_info_dict = orjson.loads(file.read())
@@ -80,16 +93,27 @@ async def scrape_update(path: str):
         MsgPrinter.print_step_mark("开始处理 share_origin")
         await update_thread(share_origin_id, is_share_origin=True)
 
+    with open(scrape_info_path, "w", encoding="utf-8") as file:
+        file.write(json_dumps(scrape_info))
+
     update_end_time = time.time()
     update_duration = update_end_time - update_start_time
-    MsgPrinter.print_step_mark("任务完成.")
     MsgPrinter.print_tip(f"耗时 {int(update_duration // 60)} 分 {round(update_duration % 60, 2)} 秒.")
+    return True
 
 
 async def update_thread(tid: int, *, is_share_origin=False):
+    try:
+        return await _update_thread(tid, is_share_origin=is_share_origin)
+    finally:
+        Container.close_thread_resources()
+
+
+async def _update_thread(tid: int, *, is_share_origin=False):
     if tid <= 0:
         return
 
+    os.makedirs(Container.get_scrape_data_path_builder().get_thread_dir(tid), exist_ok=True)
     Container.set_tid(tid)
     content_db = Container.get_content_db()
     scrape_logger = Container.get_scrape_logger()
@@ -100,6 +124,7 @@ async def update_thread(tid: int, *, is_share_origin=False):
     # 在这里判断的原因是为了更新 share_origin 数据库的数据结构。
     if is_share_origin and (not ScrapeConfig.UPDATE_SHARE_ORIGIN):
         final_treatment()
+        return True
 
     scrape_logger.info(generate_scrape_logger_msg("开始更新帖子", "StepMark", ["tid", tid]))
 
@@ -108,7 +133,7 @@ async def update_thread(tid: int, *, is_share_origin=False):
         final_treatment()
         MsgPrinter.print_error(f"帖子可能已删除", "ScrapeUpdate", ["tid", tid])
         scrape_logger.error(generate_scrape_logger_msg("帖子可能已删除", "ScrapeUpdate", ["tid", tid]))
-        return
+        return False
 
     post_service = PostService()
     user_service = UserService()
@@ -130,6 +155,7 @@ async def update_thread(tid: int, *, is_share_origin=False):
     final_treatment()
     MsgPrinter.print_step_mark("帖子更新完成", ["tid", tid])
     scrape_logger.info(generate_scrape_logger_msg("帖子更新完成", "StepMark", ["tid", tid]))
+    return True
 
 
 # 确认配置

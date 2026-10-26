@@ -29,11 +29,26 @@ class Container:
 
     @classmethod
     def set_tid(cls, tid: int) -> None:
+        cls.close_thread_resources()
         cls.tid = tid
 
         # NOTE 依赖tid的属性，再设置tid时全部重置。
         cls.scrape_logger = None
         cls.content_db = None
+
+    @classmethod
+    def close_thread_resources(cls) -> None:
+        """Release SQLite WAL files and log handles before packaging on Windows."""
+        try:
+            if cls.content_db is not None:
+                cls.content_db.close()
+        finally:
+            cls.content_db = None
+            if cls.scrape_logger is not None:
+                for handler in cls.scrape_logger.handlers[:]:
+                    handler.close()
+                    cls.scrape_logger.removeHandler(handler)
+            cls.scrape_logger = None
 
     @classmethod
     def set_scrape_timestamp(cls, timestamp: int) -> None:

@@ -6,6 +6,12 @@ from modules.scrape_module import scrape
 
 
 def main():
+    from cli_entry import read_tieba_auth, read_scrape_config
+    from storage_config import StorageConfig
+
+    read_tieba_auth()
+    read_scrape_config()
+    StorageConfig.load()
     tid = int(input("请输入要爬取的帖子的tid: "))
     asyncio.run(scrape(tid))
 

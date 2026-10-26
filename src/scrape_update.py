@@ -27,7 +27,13 @@ from modules.scrape_update_module import scrape_update
 
 
 def main():
-    path = input("请输入本地帖子数据的路径: ")
+    from cli_entry import read_tieba_auth, read_scrape_config
+    from storage_config import StorageConfig
+
+    read_tieba_auth()
+    read_scrape_config()
+    StorageConfig.load()
+    path = input("请输入帖子存档目录或 ZIP 文件的路径: ")
     asyncio.run(scrape_update(path))
 
 
